@@ -1,26 +1,23 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using RabbitMQ.Client;
+using System;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
-using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
 
 namespace RabbitMQ.Producer {
-    class Send {
-        static void Main(string[] args) {
 
+    internal class Send {
+
+        private static void Main(string[] args) {
             // EnvioSimplesParaFila();
             // EnvioWork(args);
             // EnvioWorkAck(args);
             // EnvioComExchange_Fanout(args);
             // EnvioComExchange_Direct(args);
-            EnvioComExchange_Topic(args);
+            // EnvioComExchange_Topic(args);
+            var retornoFibonacci = EnvioRPC("60");
 
-            // TODO: A fazer!
-            // Fazer o exchange enviar para a fila, para se não tiver consumer, ele pega da fila depois.
-            // Estudar e fazer o exemplo de RPC:
-            // - https://www.rabbitmq.com/tutorials/tutorial-six-dotnet.html
-            // Enviar classe para a lista
+            // TODO: Enviar classe para a lista
         }
 
         // https://www.rabbitmq.com/tutorials/tutorial-one-dotnet.html
@@ -66,7 +63,7 @@ namespace RabbitMQ.Producer {
         // NewTask
         // Para usar o Envio Work, abra vários consumers e chame o producer pelo cmd
         // Chame usando pontos finais..
-        // Exemplo: 
+        // Exemplo:
         // RabbitMQ.Producer.exe First message.
         // RabbitMQ.Producer.exe second message..
         // RabbitMQ.Producer.exe third message...
@@ -135,9 +132,9 @@ namespace RabbitMQ.Producer {
                     // Enquanto o outro raramente faz algum trabalho.
                     // =========================================================>
                     // In order to defeat that we can use the basicQos method with the prefetchCount = 1 setting.
-                    // This tells RabbitMQ not to give more than one message to a worker at a time. 
-                    // Or, in other words, don't dispatch a new message to a worker until it has 
-                    // processed and acknowledged the previous one. Instead, it will dispatch it 
+                    // This tells RabbitMQ not to give more than one message to a worker at a time.
+                    // Or, in other words, don't dispatch a new message to a worker until it has
+                    // processed and acknowledged the previous one. Instead, it will dispatch it
                     // to the next worker that is not still busy.
                     channel.BasicQos(prefetchSize: 0, prefetchCount: 2, global: false);
 
@@ -174,7 +171,6 @@ namespace RabbitMQ.Producer {
             using (var connection = factory.CreateConnection()) {
                 // Abre um canal e cria a fila
                 using (var channel = connection.CreateModel()) {
-
                     // Prepara a mensagem
                     var message = GetMessage(args);
                     var body = Encoding.UTF8.GetBytes(message);
@@ -214,7 +210,6 @@ namespace RabbitMQ.Producer {
             using (var connection = factory.CreateConnection()) {
                 // Abre um canal e cria a fila
                 using (var channel = connection.CreateModel()) {
-
                     // Prepara a mensagem
                     var severity = (args.Length > 0) ? args[0] : "info";
                     var message = (args.Length > 1)
@@ -243,7 +238,7 @@ namespace RabbitMQ.Producer {
             Console.ReadLine();
         }
 
-        // Enviando log com o tipo de routing key "kern.critical" 
+        // Enviando log com o tipo de routing key "kern.critical"
         // RabbitMQ.Producer.exe "kern.critical" "A critical kernel error"
         // https://www.rabbitmq.com/tutorials/tutorial-five-dotnet.html
         private static void EnvioComExchange_Topic(string[] args) {
@@ -257,7 +252,6 @@ namespace RabbitMQ.Producer {
             using (var connection = factory.CreateConnection()) {
                 // Abre um canal e cria a fila
                 using (var channel = connection.CreateModel()) {
-
                     channel.ExchangeDeclare(exchange: "topic_logs", type: "topic");
 
                     // Prepara a mensagem
@@ -286,6 +280,65 @@ namespace RabbitMQ.Producer {
 
             Console.WriteLine("Press [enter] to exit.");
             Console.ReadLine();
+        }
+
+        // O consumer procura na fila "rpc_queue" a mensagem com o número a ser resolvido
+        // Após recuperar da fila, chama o método fibonacci e fica esperando a resposta
+        // Quando o cálculo termina, ele envia a resposta para a fila
+        // O producer pega a resposta da fila e mostra
+        // https://www.rabbitmq.com/tutorials/tutorial-six-dotnet.html
+        private static string EnvioRPC(string message) {
+            // Instalando RabbitMQ no projeto
+            // Install-Package RabbitMQ.Client
+
+            // Host a se conectar
+            var factory = new ConnectionFactory() { HostName = "localhost" };
+
+            // Cria uma conexão específica para o endpoint
+            using (var connection = factory.CreateConnection()) {
+                // Abre um canal e cria a fila
+                using (var channel = connection.CreateModel()) {
+
+                    // Nome da fila temporária
+                    string replyQueueName = channel.QueueDeclare().QueueName;
+
+                    // Configura as propriedades do model
+                    var consumer = new QueueingBasicConsumer(channel);
+
+                    // Consumo básico com reconhecimento de mensagem
+                    channel.BasicConsume(queue: replyQueueName,
+                                        noAck: true,
+                                        consumer: consumer);
+
+                    // =======================================================
+                    // =======================================================
+                    var correleationId = Guid.NewGuid().ToString();
+                    var props = channel.CreateBasicProperties();
+                    props.ReplyTo = replyQueueName;
+                    props.CorrelationId = correleationId;
+
+                    var messageBytes = Encoding.UTF8.GetBytes(message);
+
+                    // Publica na fila especificada no (channel.QueueDeclare(queue: <<nomeDaFile>>))
+                    // Usando Exchange
+                    // - https://www.rabbitmq.com/tutorials/tutorial-three-dotnet.html
+                    // Cria um Exchange do tipo fanout
+                    // Explicação dos tipos de exchange
+                    // - https://www.rabbitmq.com/tutorials/amqp-concepts.html
+
+                    channel.BasicPublish(exchange: "",  // Nome do exchange
+                            routingKey: "rpc_queue",
+                            basicProperties: props,
+                            body: messageBytes);
+
+                    while (true) {
+                        var ea = (BasicDeliverEventArgs)consumer.Queue.Dequeue();
+                        if (ea.BasicProperties.CorrelationId == correleationId) {
+                            return Encoding.UTF8.GetString(ea.Body);
+                        }
+                    }
+                }
+            }
         }
 
         private static string GetMessage(string[] args) {
